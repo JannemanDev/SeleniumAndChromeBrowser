@@ -1,13 +1,18 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Net;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 
 namespace SeleniumAndChromeBrowser
 {
+    //TODO: - Serilog
+    //TODO: - Starting a new Chrome instance when already one present (at other port) does not work
+    //TODO: - all tabs need to be loaded before opening a new tab by ChromeDriver succeeds?!
+
     internal class Program
     {
         static void Main(string[] args)
@@ -17,15 +22,20 @@ namespace SeleniumAndChromeBrowser
             string argumentsChrome = $"--remote-debugging-port={debuggingPort}";
             string website = "https://www.google.nl"; //include protocol!
 
-            bool correctChromeAvailable = ExistingChromeAvailableListeningOnCorrectPort(debuggingPort);
-            
-            bool closed = false;
-            if (!correctChromeAvailable) closed = CloseAnyChromeInstances();
-            
-            if (closed) OpenChromeBrowser(pathChrome, argumentsChrome);
+            ChromeSearchResult chromeSearchResult = ExistingChromeAvailableListeningOnCorrectPort(debuggingPort);
 
-            Console.WriteLine($"Starting Chrome Driver and connect to Chrome browser on 127.0.0.1:{debuggingPort}");
-            ChromeDriver driver = StartChromeDriver(debuggingPort);
+            if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort) CloseAnyChromeInstances(); //mandatory!!
+
+            if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort) OpenChromeBrowser(pathChrome, argumentsChrome);
+
+            Console.WriteLine($"\nStarting Chrome Driver and connect to Chrome browser on 127.0.0.1:{debuggingPort}");
+            ChromeDriver? driver = StartChromeDriver(debuggingPort);
+
+            if (driver == null)
+            {
+                Console.WriteLine("Quiting...");
+                return;
+            }
 
             Console.WriteLine("\nOpening new tab");
             //open new tab and navigate to correct website
@@ -33,58 +43,94 @@ namespace SeleniumAndChromeBrowser
             Console.WriteLine($"Navigating to {website}");
             driver.Navigate().GoToUrl(website);
 
-            Console.WriteLine("\nPress any key to close the chromedriver...");
+            Console.WriteLine("\nPress any key to close the chromedriver and quit...");
             Console.ReadKey(true);
-            driver.Quit();
-        }
 
-        private static bool ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
-        {
             try
             {
-                string command = $"netstat -ano | grep {portNumber}";
-                ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
-                {
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                Process process = new Process() { StartInfo = startInfo };
-                process.Start();
-
-                string output = process.StandardOutput.ReadToEnd();
-                Console.WriteLine($"Command: {command}");
-                Console.WriteLine($"Output:\n{output}");
-                process.WaitForExit();
-                process.Dispose();
-
-                // Parse the output to get the process IDs from the last column
-                string[] lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (string line in lines)
-                {
-                    string[] columns = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (columns.Length >= 2 && int.TryParse(columns[columns.Length - 1], out int processId))
-                    {
-                        Process proc = Process.GetProcessById(processId);
-                        if (proc.ProcessName.Equals("chrome", StringComparison.InvariantCultureIgnoreCase))
-                        {
-                            Console.WriteLine($"Chrome process found listening on port {portNumber}: Process ID: {proc.Id}, Process Name: {proc.ProcessName}\n");
-                            return true;
-                        }
-                    }
-                }
+                Console.WriteLine($"Closing ChromeDriver...");
+                driver.Close();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error retrieving process list: {ex.Message}");
+                Console.WriteLine($"Error while closing ChromeDriver: {ex.Message}");
             }
-
-            return false;
+            finally
+            {
+                Console.WriteLine($"Quitting ChromeDriver...");
+                driver.Quit();
+            }
         }
 
-        private static ChromeDriver StartChromeDriver(int debuggingPort)
+        private static ChromeSearchResult ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
+        {
+            string command = $"netstat -ano";
+            ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            Process process = new Process() { StartInfo = startInfo };
+            process.Start();
+
+            string output = process.StandardOutput.ReadToEnd();
+            Console.WriteLine($"Command: {command}");
+            Console.WriteLine($"Output:\n{output}");
+            process.WaitForExit();
+            process.Dispose();
+
+            // Parse the output to get the process IDs from the last column
+            string[] lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            bool chromeRunning = false;
+            bool foundChromeOnCorrectPort = false;
+            foreach (string line in lines)
+            {
+                string[] columns = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (columns.Length != 5) continue;
+
+                string protoColumn = columns[0];
+                string localAddressColumn = columns[1];
+                string foreignAddressColumn = columns[2];
+                string stateColumn = columns[3];
+                int pid = int.Parse(columns[4]);
+
+                try
+                {
+                    string processName = Process.GetProcessById(pid).ProcessName;
+
+                    if (processName.Equals("chrome", StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        chromeRunning = true;
+
+                        if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals("LISTENING", StringComparison.InvariantCultureIgnoreCase))
+                        {
+                            foundChromeOnCorrectPort = true;
+                            Console.WriteLine($"Chrome process found LISTENING on port {portNumber}: Process ID: {pid}\n");
+                            return ChromeSearchResult.FoundAndListeningOnCorrectPort;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error retrieving process name for PID {pid}: {ex.Message}\n");
+                }
+            }
+
+            if (chromeRunning)
+            {
+                Console.WriteLine($"Chrome process was found, but it was not LISTENING on port {portNumber}\n");
+                return ChromeSearchResult.Found;
+            }
+            else Console.WriteLine($"Chrome process was NOT found!\n");
+
+            return ChromeSearchResult.NotFound;
+        }
+
+
+        private static ChromeDriver? StartChromeDriver(int debuggingPort)
         {
             ChromeOptions chromeOptions = new ChromeOptions();
             //chromeOptions.AddArgument("--headless");
@@ -94,13 +140,24 @@ namespace SeleniumAndChromeBrowser
 
             //be sure your regular Chrome browser version (see Help > About) matches this chromedriver package version
             //timeout lowered for easier/faster testing if chromedriver is connected to just created Chrome browser instance
-            var driver = new ChromeDriver(ChromeDriverService.CreateDefaultService(), chromeOptions, TimeSpan.FromSeconds(20));
+
+            ChromeDriver driver = null;
+            try
+            {
+                //driver = new ChromeDriver(chromeOptions);
+                driver = new ChromeDriver(ChromeDriverService.CreateDefaultService(), chromeOptions, TimeSpan.FromSeconds(60));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error attaching ChromeDriver: {ex.Message}");
+            }
+
             return driver;
         }
 
         private static void OpenChromeBrowser(string pathChrome, string argumentsChrome)
         {
-            var process = new Process();
+            Process process = new Process();
             process.StartInfo.FileName = pathChrome;
             process.StartInfo.Arguments = argumentsChrome;
             process.StartInfo.UseShellExecute = false;
@@ -108,15 +165,11 @@ namespace SeleniumAndChromeBrowser
             process.Start();
 
             Console.Write("Waiting for Chrome to start");
-            while (string.IsNullOrEmpty(process.MainWindowTitle))
-            {
-                Console.Write(".");
-                Thread.Sleep(100);
-                process.Refresh();
-            }
+            process.WaitForInputIdle();
             Console.WriteLine($"\nChrome started with arguments: \"{pathChrome}\" {argumentsChrome}");
-            Console.WriteLine("Press any key to continue...");
-            Console.ReadKey(true);
+
+            //Console.WriteLine("Press any key to continue...");
+            //Console.ReadKey(true);
         }
 
         static bool CloseAnyChromeInstances()
@@ -135,12 +188,12 @@ namespace SeleniumAndChromeBrowser
                             args.ErrorContext.Handled = true;
                         },
                     });
-                Console.WriteLine($"{processes.Count()} processes found:\n{json}");
+                Console.WriteLine($"{processes.Count()} Chrome processes found:\n{json}");
 
                 Console.WriteLine("\nPress any key to close the processes or <ESC> to skip...");
                 if (Console.ReadKey(true).Key == ConsoleKey.Escape) return false;
 
-                Console.WriteLine("Closing processes...");
+                Console.WriteLine("\nClosing processes...");
                 processes.ToList().ForEach(p => p.CloseMainWindow());
                 Console.WriteLine("Waiting for processes to exit...");
                 processes.ToList().ForEach(p => p.WaitForExit());
