@@ -1,1 +1,3 @@
+@echo off
+echo Starting Chrome...
 start "" "C:\Program Files\Google\Chrome\Application\chrome.exe"

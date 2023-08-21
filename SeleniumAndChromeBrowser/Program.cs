@@ -6,59 +6,118 @@ using System.Net.NetworkInformation;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
+using Serilog.Core;
+using Serilog;
+using Microsoft.Extensions.Configuration;
+using OpenQA.Selenium.Interactions;
+using OpenQA.Selenium.Support.UI;
 
 namespace SeleniumAndChromeBrowser
 {
-    //TODO: - Serilog
-    //TODO: - Starting a new Chrome instance when already one present (at other port) does not work
     //TODO: - all tabs need to be loaded before opening a new tab by ChromeDriver succeeds?!
 
     internal class Program
     {
+        static Logger logger;
+        static IConfigurationRoot config;
+        static string executingDir = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+
         static void Main(string[] args)
         {
-            string pathChrome = @"C:\Program Files\Google\Chrome\Application\chrome.exe";
-            int debuggingPort = 1559;
-            string argumentsChrome = $"--remote-debugging-port={debuggingPort}";
-            string website = "https://www.google.nl"; //include protocol!
+            config = InitConfiguration(executingDir);
+            logger = InitLogging(config);
 
-            ChromeSearchResult chromeSearchResult = ExistingChromeAvailableListeningOnCorrectPort(debuggingPort);
+            logger.Information("");
+            logger.Information("----------------------------------------------------------------------------------------------------------");
+            logger.Information($"Starting, executing directory is \"{executingDir}\"");
 
-            if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort) CloseAnyChromeInstances(); //mandatory!!
+            string pathChrome = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromePath");
+            int debuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<int>("DebuggingPort");
+            bool runHeadless = config.GetRequiredSection("ChromeDriver").GetValue<bool>("RunHeadless");
+            bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
 
-            if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort) OpenChromeBrowser(pathChrome, argumentsChrome);
+            if (!runHeadless)
+            {
+                ChromeSearchResult chromeSearchResult = ExistingChromeAvailableListeningOnCorrectPort(debuggingPort);
 
-            Console.WriteLine($"\nStarting Chrome Driver and connect to Chrome browser on 127.0.0.1:{debuggingPort}");
-            ChromeDriver? driver = StartChromeDriver(debuggingPort);
+                if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort)
+                {
+                    AskToCloseAnyChromeInstances();
+
+                    string profileDir = executingDir;
+                    if (useTempPathForProfile)
+                    {
+                        string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
+                        profileDir = tempDir;
+                    }
+                    profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
+
+                    //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
+                    string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
+
+                    OpenChromeBrowser(pathChrome, argumentsChrome);
+                }
+            }
+
+            ChromeDriver? driver = StartChromeDriver(debuggingPort, runHeadless);
 
             if (driver == null)
             {
-                Console.WriteLine("Quiting...");
+                logger.Information("Quiting...");
+                ShutdownChromeDriver(driver);
                 return;
             }
 
-            Console.WriteLine("\nOpening new tab");
+            logger.Information("Opening new tab");
             //open new tab and navigate to correct website
             driver.SwitchTo().NewWindow(WindowType.Tab);
-            Console.WriteLine($"Navigating to {website}");
+            string website = "https://www.google.nl"; //include protocol!
+            logger.Information($"Navigating to {website}");
             driver.Navigate().GoToUrl(website);
 
-            Console.WriteLine("\nPress any key to close the chromedriver and quit...");
+            logger.Information("Press any key to close the chromedriver and quit...");
             Console.ReadKey(true);
 
+            ShutdownChromeDriver(driver);
+            logger.Information("Ended");
+        }
+
+        static IConfigurationRoot InitConfiguration(string loadFromPath)
+        {
+            IConfigurationRoot configuration = new ConfigurationBuilder()
+                .SetBasePath(loadFromPath)
+                .AddJsonFile("appsettings.json", optional: false)
+                .Build();
+
+            return configuration;
+        }
+
+        static Logger InitLogging(IConfigurationRoot configuration)
+        {
+            Logger logger = new LoggerConfiguration()
+                .ReadFrom.Configuration(configuration)
+                .CreateLogger();
+
+            return logger;
+        }
+
+        private static void ShutdownChromeDriver(ChromeDriver? driver)
+        {
             try
             {
-                Console.WriteLine($"Closing ChromeDriver...");
-                driver.Close();
+                logger.Information($"Closing ChromeDriver...");
+                driver?.Close();
+                logger.Information($"Closed ChromeDriver...");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error while closing ChromeDriver: {ex.Message}");
+                logger.Information($"Error while closing ChromeDriver: {ex.Message}");
             }
             finally
             {
-                Console.WriteLine($"Quitting ChromeDriver...");
-                driver.Quit();
+                logger.Information($"Quitting ChromeDriver...");
+                driver?.Quit();
+                logger.Information($"Quitted ChromeDriver...");
             }
         }
 
@@ -76,8 +135,8 @@ namespace SeleniumAndChromeBrowser
             process.Start();
 
             string output = process.StandardOutput.ReadToEnd();
-            Console.WriteLine($"Command: {command}");
-            Console.WriteLine($"Output:\n{output}");
+            logger.Information($"Command: {command}");
+            logger.Information($"Output:\n{output}");
             process.WaitForExit();
             process.Dispose();
 
@@ -85,7 +144,6 @@ namespace SeleniumAndChromeBrowser
             string[] lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
             bool chromeRunning = false;
-            bool foundChromeOnCorrectPort = false;
             foreach (string line in lines)
             {
                 string[] columns = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
@@ -107,49 +165,60 @@ namespace SeleniumAndChromeBrowser
 
                         if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals("LISTENING", StringComparison.InvariantCultureIgnoreCase))
                         {
-                            foundChromeOnCorrectPort = true;
-                            Console.WriteLine($"Chrome process found LISTENING on port {portNumber}: Process ID: {pid}\n");
+                            logger.Information($"Chrome process found LISTENING on port {portNumber}: Process ID: {pid}");
                             return ChromeSearchResult.FoundAndListeningOnCorrectPort;
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error retrieving process name for PID {pid}: {ex.Message}\n");
+                    logger.Information($"Error retrieving process name for PID {pid}: {ex.Message}");
                 }
             }
 
             if (chromeRunning)
             {
-                Console.WriteLine($"Chrome process was found, but it was not LISTENING on port {portNumber}\n");
+                logger.Information($"Chrome process was found, but it was *not* LISTENING on port {portNumber}");
                 return ChromeSearchResult.Found;
             }
-            else Console.WriteLine($"Chrome process was NOT found!\n");
+            else logger.Information($"Chrome process was NOT found!");
 
             return ChromeSearchResult.NotFound;
         }
 
-
-        private static ChromeDriver? StartChromeDriver(int debuggingPort)
+        private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess = false)
         {
             ChromeOptions chromeOptions = new ChromeOptions();
-            //chromeOptions.AddArgument("--headless");
-            //chromeOptions.AddArgument("--disable-gpu");
-            //chromeOptions.AddArgument("--no-sandbox");
-            chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}";
+            if (headLess)
+            {
+                chromeOptions.AddArgument("--headless=new");
+                logger.Information($"Starting Chrome Driver in headless mode, ignoring debuggingPort");
+            }
+            else chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}";
+
+            /*
+                PageLoadStrategy:
+                -normal: This is the default behavior where WebDriver waits for the full page to load, 
+                         including sub-resources such as images, scripts, and stylesheets.
+                -eager: WebDriver waits for the DOMContentLoaded event, which signifies that the initial HTML document 
+                        has been completely loaded and parsed.
+                -none: WebDriver does not wait for the page to load at all. This can be useful for scenarios where 
+                       you want to take control of waiting for elements explicitly using explicit waits.
+            */
+            chromeOptions.PageLoadStrategy = PageLoadStrategy.Normal;
 
             //be sure your regular Chrome browser version (see Help > About) matches this chromedriver package version
             //timeout lowered for easier/faster testing if chromedriver is connected to just created Chrome browser instance
 
-            ChromeDriver driver = null;
+            ChromeDriver? driver = null;
             try
             {
-                //driver = new ChromeDriver(chromeOptions);
-                driver = new ChromeDriver(ChromeDriverService.CreateDefaultService(), chromeOptions, TimeSpan.FromSeconds(60));
+                logger.Information($"Starting Chrome Driver and connect to Chrome browser on 127.0.0.1:{debuggingPort}\n");
+                driver = new ChromeDriver(ChromeDriverService.CreateDefaultService(), chromeOptions, TimeSpan.FromSeconds(20));
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error attaching ChromeDriver: {ex.Message}");
+                logger.Information($"Error attaching ChromeDriver: {ex.Message}");
             }
 
             return driver;
@@ -164,15 +233,15 @@ namespace SeleniumAndChromeBrowser
             process.StartInfo.CreateNoWindow = false;
             process.Start();
 
-            Console.Write("Waiting for Chrome to start");
+            logger.Information("Waiting for Chrome to start");
             process.WaitForInputIdle();
-            Console.WriteLine($"\nChrome started with arguments: \"{pathChrome}\" {argumentsChrome}");
+            logger.Information($"Chrome started with arguments: \"{pathChrome}\" {argumentsChrome}");
 
-            //Console.WriteLine("Press any key to continue...");
+            //logger.Information("Press any key to continue...");
             //Console.ReadKey(true);
         }
 
-        static bool CloseAnyChromeInstances()
+        static bool AskToCloseAnyChromeInstances()
         {
             Process[] processes = Process.GetProcessesByName("chrome");
 
@@ -188,21 +257,23 @@ namespace SeleniumAndChromeBrowser
                             args.ErrorContext.Handled = true;
                         },
                     });
-                Console.WriteLine($"{processes.Count()} Chrome processes found:\n{json}");
+                logger.Information($"{processes.Count()} Chrome processes found:\n{json}");
 
-                Console.WriteLine("\nPress any key to close the processes or <ESC> to skip...");
+                logger.Information("Press any key to close the processes or <ESC> to skip...");
                 if (Console.ReadKey(true).Key == ConsoleKey.Escape) return false;
 
-                Console.WriteLine("\nClosing processes...");
+                logger.Information("Closing processes...");
                 processes.ToList().ForEach(p => p.CloseMainWindow());
-                Console.WriteLine("Waiting for processes to exit...");
+                logger.Information("Waiting for processes to exit...");
                 processes.ToList().ForEach(p => p.WaitForExit());
-                Console.WriteLine("Processes all exited...");
+                logger.Information("Processes all exited...");
+
                 return true;
             }
             else
             {
-                Console.WriteLine($"No processes found!");
+                logger.Information($"No processes found!");
+
                 return true;
             }
         }
