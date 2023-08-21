@@ -31,10 +31,8 @@ namespace SeleniumAndChromeBrowser
             logger.Information("----------------------------------------------------------------------------------------------------------");
             logger.Information($"Starting, executing directory is \"{executingDir}\"");
 
-            string pathChrome = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromePath");
             int debuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<int>("DebuggingPort");
             bool runHeadless = config.GetRequiredSection("ChromeDriver").GetValue<bool>("RunHeadless");
-            bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
 
             if (!runHeadless)
             {
@@ -42,9 +40,11 @@ namespace SeleniumAndChromeBrowser
 
                 if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort)
                 {
-                    AskToCloseAnyChromeInstances();
+                    ChromeInstancesNotListeningOnSpecifiedDebuggingPort chromeInstancesNotListeningOnSpecifiedDebuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<ChromeInstancesNotListeningOnSpecifiedDebuggingPort>("ChromeInstancesNotListeningOnSpecifiedDebuggingPort");
+                    if (chromeSearchResult != ChromeSearchResult.NotFound) CloseAllChromeInstances(chromeInstancesNotListeningOnSpecifiedDebuggingPort);
 
                     string profileDir = executingDir;
+                    bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
                     if (useTempPathForProfile)
                     {
                         string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
@@ -55,6 +55,7 @@ namespace SeleniumAndChromeBrowser
                     //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
                     string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
 
+                    string pathChrome = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromePath");
                     OpenChromeBrowser(pathChrome, argumentsChrome);
                 }
             }
@@ -123,7 +124,7 @@ namespace SeleniumAndChromeBrowser
 
         private static ChromeSearchResult ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
         {
-            string command = $"netstat -ano";
+            string command = $"netstat -ano -p TCP";
             ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
             {
                 RedirectStandardOutput = true,
@@ -132,11 +133,11 @@ namespace SeleniumAndChromeBrowser
             };
 
             Process process = new Process() { StartInfo = startInfo };
+            logger.Information($"Command run to find all processes using a TCP port: {command}");
             process.Start();
 
             string output = process.StandardOutput.ReadToEnd();
-            logger.Information($"Command: {command}");
-            logger.Information($"Output:\n{output}");
+            logger.Debug($"Output:\n{output}");
             process.WaitForExit();
             process.Dispose();
 
@@ -165,7 +166,7 @@ namespace SeleniumAndChromeBrowser
 
                         if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals("LISTENING", StringComparison.InvariantCultureIgnoreCase))
                         {
-                            logger.Information($"Chrome process found LISTENING on port {portNumber}: Process ID: {pid}");
+                            logger.Information($"A Chrome process was found LISTENING on port {portNumber}: Process ID: {pid}");
                             return ChromeSearchResult.FoundAndListeningOnCorrectPort;
                         }
                     }
@@ -178,10 +179,10 @@ namespace SeleniumAndChromeBrowser
 
             if (chromeRunning)
             {
-                logger.Information($"Chrome process was found, but it was *not* LISTENING on port {portNumber}");
+                logger.Information($"Chrome process(es) were found, but *none* was LISTENING on port {portNumber}");
                 return ChromeSearchResult.Found;
             }
-            else logger.Information($"Chrome process was NOT found!");
+            else logger.Information($"No Chrome process was NOT found!");
 
             return ChromeSearchResult.NotFound;
         }
@@ -241,8 +242,10 @@ namespace SeleniumAndChromeBrowser
             //Console.ReadKey(true);
         }
 
-        static bool AskToCloseAnyChromeInstances()
+        static bool CloseAllChromeInstances(ChromeInstancesNotListeningOnSpecifiedDebuggingPort chromeInstancesNotListeningOnSpecifiedDebuggingPort)
         {
+            if (chromeInstancesNotListeningOnSpecifiedDebuggingPort == ChromeInstancesNotListeningOnSpecifiedDebuggingPort.DontClose) return false;
+
             Process[] processes = Process.GetProcessesByName("chrome");
 
             if (processes.Length > 0)
@@ -257,10 +260,14 @@ namespace SeleniumAndChromeBrowser
                             args.ErrorContext.Handled = true;
                         },
                     });
-                logger.Information($"{processes.Count()} Chrome processes found:\n{json}");
+                logger.Information($"{processes.Count()} Chrome processes found!");
+                logger.Debug($"Process details:\n{json}");
 
-                logger.Information("Press any key to close the processes or <ESC> to skip...");
-                if (Console.ReadKey(true).Key == ConsoleKey.Escape) return false;
+                if (chromeInstancesNotListeningOnSpecifiedDebuggingPort == ChromeInstancesNotListeningOnSpecifiedDebuggingPort.Ask)
+                {
+                    logger.Information("Press any key to close all Chrome processes or <ESC> to skip...");
+                    if (Console.ReadKey(true).Key == ConsoleKey.Escape) return false;
+                }
 
                 logger.Information("Closing processes...");
                 processes.ToList().ForEach(p => p.CloseMainWindow());
