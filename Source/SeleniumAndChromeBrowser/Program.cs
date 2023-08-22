@@ -11,6 +11,11 @@ using Serilog;
 using Microsoft.Extensions.Configuration;
 using OpenQA.Selenium.Interactions;
 using OpenQA.Selenium.Support.UI;
+using OpenQA.Selenium.DevTools;
+using System.ComponentModel;
+using System.IO;
+using System.Numerics;
+using System;
 
 namespace SeleniumAndChromeBrowser
 {
@@ -61,6 +66,13 @@ namespace SeleniumAndChromeBrowser
             }
 
             ChromeDriver? driver = StartChromeDriver(debuggingPort, runHeadless);
+
+            string chromeVersion = ChromeVersion(driver);
+            string chromeDriverPath = Path.Combine(executingDir, "chromedriver.exe");
+            string chromeDriverVersion = ChromeDriverVersion(chromeDriverPath);
+
+            logger.Information($"Chrome driver version: {chromeDriverVersion}");
+            logger.Information($"Chrome version: {chromeVersion}");
 
             if (driver == null)
             {
@@ -190,13 +202,27 @@ namespace SeleniumAndChromeBrowser
         private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess = false)
         {
             ChromeOptions chromeOptions = new ChromeOptions();
+            string chromeType;
             if (headLess)
             {
-                chromeOptions.AddArgument("--headless=new");
-                logger.Information($"Starting Chrome Driver in headless mode, ignoring debuggingPort");
-            }
-            else chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}";
+                chromeType = "headless instance";
 
+                chromeOptions.AddArgument("--headless=new");
+                chromeOptions.AddArgument($"--remote-debugging-port={debuggingPort}");
+
+                string[] extraHeadlessArguments = config.GetRequiredSection("ChromeDriver").GetSection("ExtraHeadlessArguments").Get<string[]>();
+                extraHeadlessArguments = extraHeadlessArguments.Select(s => s.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
+                chromeOptions.AddArguments(extraHeadlessArguments);
+
+                string extraHeadlessArgumentsString = "";
+                if (extraHeadlessArguments.Any()) extraHeadlessArgumentsString = $"and extra arguments: {string.Join(" ", extraHeadlessArguments)}";
+                logger.Information($"Chrome Driver will start in headless mode with remote-debugging-port={debuggingPort} {extraHeadlessArgumentsString}");
+            }
+            else
+            {
+                chromeType = "browser";
+                chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}"; //this line is not needed when using headless mode
+            }
             /*
                 PageLoadStrategy:
                 -normal: This is the default behavior where WebDriver waits for the full page to load, 
@@ -214,8 +240,9 @@ namespace SeleniumAndChromeBrowser
             ChromeDriver? driver = null;
             try
             {
-                logger.Information($"Starting Chrome Driver and connect to Chrome browser on 127.0.0.1:{debuggingPort}\n");
-                driver = new ChromeDriver(ChromeDriverService.CreateDefaultService(), chromeOptions, TimeSpan.FromSeconds(20));
+                ChromeDriverService chromeDriverService = ChromeDriverService.CreateDefaultService();
+                logger.Information($"Starting Chrome Driver and connecting to Chrome {chromeType} on 127.0.0.1:{debuggingPort}\n");
+                driver = new ChromeDriver(chromeDriverService, chromeOptions, TimeSpan.FromSeconds(20));
             }
             catch (Exception ex)
             {
@@ -283,6 +310,43 @@ namespace SeleniumAndChromeBrowser
 
                 return true;
             }
+        }
+
+        static string ChromeDriverVersion(string chromeDriverPath)
+        {
+
+            ProcessStartInfo processStartInfo = new ProcessStartInfo
+            {
+                FileName = chromeDriverPath,
+                Arguments = "--version",
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (Process process = new Process())
+            {
+                process.StartInfo = processStartInfo;
+                process.Start();
+
+                string versionOutput = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                string[] versionLines = versionOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                string chromeDriverVersion = versionLines[0]; // The version is usually on the first line
+
+                return chromeDriverVersion.Split(" ")[1];
+            }
+        }
+
+        static string ChromeVersion(ChromeDriver? driver)
+        {
+            driver.Navigate().GoToUrl("about:blank");
+
+            // Execute JavaScript to get the browser version
+            string browserVersion = driver.ExecuteScript("return navigator.userAgent").ToString();
+
+            return browserVersion;
         }
     }
 }

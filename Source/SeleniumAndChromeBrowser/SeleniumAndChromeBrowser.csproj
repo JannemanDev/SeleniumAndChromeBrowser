@@ -25,4 +25,10 @@
     </None>
   </ItemGroup>
 
+  <Target Name="CopyCustomContentOnPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier.Contains(win))'">
+    <Copy SourceFiles="..\..\checkIfChromeIsListeningOnRemoteDebuggingPort.bat" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="..\..\startChrome.bat" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="..\..\startChromeWithRemoteDebugging.bat" DestinationFolder="$(PublishDir)" />
+  </Target>
+  
 </Project>
