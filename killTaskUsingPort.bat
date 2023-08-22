@@ -1,6 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
 
+if "%~1" == "" (
+    echo Description: Kills the task which is LISTENING to the given port using TCP protocol
+    echo Usage: %~nx0 PORT_NUMBER
+    exit /b 1
+)
+
 set "port=%~1"
 set "found=0"
 set "output="
