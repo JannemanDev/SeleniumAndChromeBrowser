@@ -25,10 +25,20 @@
     </None>
   </ItemGroup>
 
-  <Target Name="CopyCustomContentOnPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier.Contains(win))'">
+  <Target Name="CopyCustomContentOnBuild" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)\..\..\killTaskUsingPort.bat" DestinationFolder="$(OutputPath)" />
+  </Target>
+
+  <Target Name="CopyCustomWindowsContentOnPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier.Contains(win))'">
     <Copy SourceFiles="..\..\checkIfChromeIsListeningOnRemoteDebuggingPort.bat" DestinationFolder="$(PublishDir)" />
     <Copy SourceFiles="..\..\startChrome.bat" DestinationFolder="$(PublishDir)" />
     <Copy SourceFiles="..\..\startChromeWithRemoteDebugging.bat" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="..\..\killTaskUsingPort.bat" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="$(OutputPath)\chromedriver.exe" DestinationFolder="$(PublishDir)" />
+  </Target>
+
+  <Target Name="CopyCustomLinuxContentOnPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier.Contains(linux))'">
+    <Copy SourceFiles="$(OutputPath)\chromedriver" DestinationFolder="$(PublishDir)" />
   </Target>
   
 </Project>

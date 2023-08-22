@@ -16,6 +16,8 @@ using System.ComponentModel;
 using System.IO;
 using System.Numerics;
 using System;
+using OpenQA.Selenium.Remote;
+using System.Net.Sockets;
 
 namespace SeleniumAndChromeBrowser
 {
@@ -39,40 +41,69 @@ namespace SeleniumAndChromeBrowser
             int debuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<int>("DebuggingPort");
             bool runHeadless = config.GetRequiredSection("ChromeDriver").GetValue<bool>("RunHeadless");
 
-            if (!runHeadless)
+            ChromeDriver? driver;
+            ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode = config.GetRequiredSection("ChromeDriver").GetValue<ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode>("ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode");
+            do
             {
                 ChromeSearchResult chromeSearchResult = ExistingChromeAvailableListeningOnCorrectPort(debuggingPort);
+                ChromeInstancesNotListeningOnSpecifiedDebuggingPort chromeInstancesNotListeningOnSpecifiedDebuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<ChromeInstancesNotListeningOnSpecifiedDebuggingPort>("ChromeInstancesNotListeningOnSpecifiedDebuggingPort");
 
-                if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort)
+                if (!runHeadless)
                 {
-                    ChromeInstancesNotListeningOnSpecifiedDebuggingPort chromeInstancesNotListeningOnSpecifiedDebuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<ChromeInstancesNotListeningOnSpecifiedDebuggingPort>("ChromeInstancesNotListeningOnSpecifiedDebuggingPort");
-                    if (chromeSearchResult != ChromeSearchResult.NotFound) CloseAllChromeInstances(chromeInstancesNotListeningOnSpecifiedDebuggingPort);
-
-                    string profileDir = executingDir;
-                    bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
-                    if (useTempPathForProfile)
+                    if (chromeSearchResult != ChromeSearchResult.FoundAndListeningOnCorrectPort)
                     {
-                        string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
-                        profileDir = tempDir;
+                        if (chromeSearchResult != ChromeSearchResult.NotFound) CloseAllChromeInstances(chromeInstancesNotListeningOnSpecifiedDebuggingPort);
+
+                        string profileDir = executingDir;
+                        bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
+                        if (useTempPathForProfile)
+                        {
+                            string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
+                            profileDir = tempDir;
+                        }
+                        profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
+
+                        //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
+                        string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
+
+                        string pathChrome = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromePath");
+                        OpenChromeBrowser(pathChrome, argumentsChrome);
                     }
-                    profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
-
-                    //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
-                    string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
-
-                    string pathChrome = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromePath");
-                    OpenChromeBrowser(pathChrome, argumentsChrome);
                 }
-            }
 
-            ChromeDriver? driver = StartChromeDriver(debuggingPort, runHeadless);
+                driver = StartChromeDriver(debuggingPort, runHeadless, chromeSearchResult == ChromeSearchResult.FoundAndListeningOnCorrectPort);
 
-            string chromeVersion = ChromeVersion(driver);
-            string chromeDriverPath = Path.Combine(executingDir, "chromedriver.exe");
-            string chromeDriverVersion = ChromeDriverVersion(chromeDriverPath);
+                string chromeVersion = ChromeUserAgentVersion(driver);
+                logger.Information($"Chrome Browser User Agent string: {chromeVersion}");
 
-            logger.Information($"Chrome driver version: {chromeDriverVersion}");
-            logger.Information($"Chrome version: {chromeVersion}");
+                bool chromeConnectedIsHeadless = ChromeIsHeadless(driver);
+
+                if (chromeConnectedIsHeadless) logger.Information("ChromeDriver is connected to a Chrome instance that is headless!");
+                else logger.Information("ChromeDriver is connected to a Chrome instance that is non-headless (with GUI)!");
+
+                if (chromeConnectedIsHeadless != runHeadless)
+                {
+                    logger.Error($"RunHeadless is {runHeadless} but chromeConnectedIsHeadless={chromeConnectedIsHeadless}!");
+                    if (chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode == ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode.AutoCloseAndRetry)
+                    {
+                        logger.Information("Closing Chrome instance and retrying...");
+
+                        KillProcessByPort(debuggingPort);
+                    }
+                    else if (chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode == ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode.Exit)
+                    {
+                        ShutdownChromeDriver(driver);
+                        return;
+                    }
+                    else if (chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode == ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode.DontClose)
+                    {
+                        logger.Warning($"ChromeDriver will connect to a Chrome instance which is {HeadlessDescription(chromeConnectedIsHeadless)} instead of the preferred setting {HeadlessDescription(runHeadless)}");
+                        break;
+                    }
+                    else throw new InvalidEnumArgumentException($"Invalid value for ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode: {chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode}");
+                }
+                else break;
+            } while (true);
 
             if (driver == null)
             {
@@ -199,7 +230,7 @@ namespace SeleniumAndChromeBrowser
             return ChromeSearchResult.NotFound;
         }
 
-        private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess = false)
+        private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess, bool attach)
         {
             ChromeOptions chromeOptions = new ChromeOptions();
             string chromeType;
@@ -208,7 +239,8 @@ namespace SeleniumAndChromeBrowser
                 chromeType = "headless instance";
 
                 chromeOptions.AddArgument("--headless=new");
-                chromeOptions.AddArgument($"--remote-debugging-port={debuggingPort}");
+                if (!attach) chromeOptions.AddArgument($"--remote-debugging-port={debuggingPort}");
+                else chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}";
 
                 string[] extraHeadlessArguments = config.GetRequiredSection("ChromeDriver").GetSection("ExtraHeadlessArguments").Get<string[]>();
                 extraHeadlessArguments = extraHeadlessArguments.Select(s => s.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
@@ -223,26 +255,47 @@ namespace SeleniumAndChromeBrowser
                 chromeType = "browser";
                 chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}"; //this line is not needed when using headless mode
             }
-            /*
-                PageLoadStrategy:
-                -normal: This is the default behavior where WebDriver waits for the full page to load, 
-                         including sub-resources such as images, scripts, and stylesheets.
-                -eager: WebDriver waits for the DOMContentLoaded event, which signifies that the initial HTML document 
-                        has been completely loaded and parsed.
-                -none: WebDriver does not wait for the page to load at all. This can be useful for scenarios where 
-                       you want to take control of waiting for elements explicitly using explicit waits.
-            */
-            chromeOptions.PageLoadStrategy = PageLoadStrategy.Normal;
-
-            //be sure your regular Chrome browser version (see Help > About) matches this chromedriver package version
-            //timeout lowered for easier/faster testing if chromedriver is connected to just created Chrome browser instance
 
             ChromeDriver? driver = null;
             try
             {
-                ChromeDriverService chromeDriverService = ChromeDriverService.CreateDefaultService();
-                logger.Information($"Starting Chrome Driver and connecting to Chrome {chromeType} on 127.0.0.1:{debuggingPort}\n");
-                driver = new ChromeDriver(chromeDriverService, chromeOptions, TimeSpan.FromSeconds(20));
+                string chromeDriverPath = config.GetRequiredSection("ChromeDriver").GetValue<string>("ChromeDriverPath");
+                bool usingChromeDriverFromConfig = chromeDriverPath != "";
+                string chromeDriverFileName = "";
+
+                if (usingChromeDriverFromConfig)
+                {
+                    if (Directory.Exists(chromeDriverPath) == false)
+                    {
+                        logger.Warning($"ChromeDriver directory does not exist: \"{chromeDriverPath}\"");
+                        usingChromeDriverFromConfig = false;
+                    }
+
+                    chromeDriverFileName = Path.Combine(chromeDriverPath, "chromedriver.exe");
+                    if (File.Exists(chromeDriverFileName) == false)
+                    {
+                        logger.Warning($"ChromeDriver \"chromedriver.exe\" not found in path \"{chromeDriverPath}\"");
+                        usingChromeDriverFromConfig = false;
+                    }
+                }
+
+                ChromeDriverService chromeDriverService;
+                if (usingChromeDriverFromConfig)
+                {
+                    logger.Information($"Using ChromeDriver located at: \"{chromeDriverFileName}\"");
+                    chromeDriverService = ChromeDriverService.CreateDefaultService(chromeDriverPath);
+                }
+                else
+                {
+                    logger.Information("Trying to use builtin or in path found ChromeDriver");
+                    chromeDriverService = ChromeDriverService.CreateDefaultService();
+                }
+
+                logger.Information($"Starting ChromeDriver and connecting to Chrome {chromeType} on 127.0.0.1:{debuggingPort}\n");
+                int connectionTimeOut = config.GetRequiredSection("ChromeDriver").GetValue<int>("connectionTimeOut");
+                driver = new ChromeDriver(chromeDriverService, chromeOptions, TimeSpan.FromSeconds(connectionTimeOut));
+
+                ShowChromeDriverVersions(driver);
             }
             catch (Exception ex)
             {
@@ -250,6 +303,19 @@ namespace SeleniumAndChromeBrowser
             }
 
             return driver;
+        }
+
+        private static void ShowChromeDriverVersions(ChromeDriver? driver)
+        {
+            ICapabilities capabilities = ((WebDriver)driver).Capabilities;
+
+            bool isHeadless = capabilities.HasCapability("goog:chromeOptions");
+
+            var seleniumWebDriverVersion = (capabilities.GetCapability("chrome") as Dictionary<string, object>)["chromedriverVersion"];
+            logger.Information("ChromeDriver version: " + seleniumWebDriverVersion);
+
+            string? browserVersion = capabilities.GetCapability("browserVersion") as string;
+            logger.Information("Chrome Browser version: " + browserVersion);
         }
 
         private static void OpenChromeBrowser(string pathChrome, string argumentsChrome)
@@ -312,41 +378,50 @@ namespace SeleniumAndChromeBrowser
             }
         }
 
-        static string ChromeDriverVersion(string chromeDriverPath)
+        static string ChromeUserAgentVersion(ChromeDriver? driver)
         {
+            if (driver == null) return "n/a";
 
-            ProcessStartInfo processStartInfo = new ProcessStartInfo
-            {
-                FileName = chromeDriverPath,
-                Arguments = "--version",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (Process process = new Process())
-            {
-                process.StartInfo = processStartInfo;
-                process.Start();
-
-                string versionOutput = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-
-                string[] versionLines = versionOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                string chromeDriverVersion = versionLines[0]; // The version is usually on the first line
-
-                return chromeDriverVersion.Split(" ")[1];
-            }
-        }
-
-        static string ChromeVersion(ChromeDriver? driver)
-        {
             driver.Navigate().GoToUrl("about:blank");
 
             // Execute JavaScript to get the browser version
             string browserVersion = driver.ExecuteScript("return navigator.userAgent").ToString();
 
             return browserVersion;
+        }
+
+        static bool ChromeIsHeadless(ChromeDriver? driver)
+        {
+            if (driver == null) throw new ArgumentException("Driver is null!");
+
+            driver.Navigate().GoToUrl("about:blank");
+
+            //See https://antoinevastel.com/bot%20detection/2018/01/17/detect-chrome-headless-v2.html#:%7E:text=In%20order%20to%20automate%20Chrome,possible%20to%20detect%20Chrome%20headless
+            bool chromeIsHeadless = driver.ExecuteScript("return navigator.webdriver").ToString().Equals("True", StringComparison.InvariantCultureIgnoreCase);
+
+            return chromeIsHeadless;
+        }
+
+        static void KillProcessByPort(int port)
+        {
+            Process process = new Process();
+            process.StartInfo.FileName = Path.Combine(executingDir, "killTaskUsingPort.bat");
+            process.StartInfo.Arguments = port.ToString();
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.CreateNoWindow = true;
+
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+
+            Console.WriteLine(output);
+        }
+
+        static string HeadlessDescription(bool isHeadless)
+        {
+            if (isHeadless) return "headless (no GUI)";
+            else return "not headless (with GUI)";
         }
     }
 }
