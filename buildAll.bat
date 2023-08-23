@@ -1,6 +1,6 @@
-set version=1.0
+set version=1.1
 set dotnetcore=net6.0
-set solutionfolder=C:\Users\JanOonk\source\repos\SeleniumAndChromeBrowser\
+set solutionfolder=C:\Users\SomeUser\source\repos\SeleniumAndChromeBrowser\
 set projectsubfolder=source\SeleniumAndChromeBrowser\
 set project=SeleniumAndChromeBrowser
 set release=Release

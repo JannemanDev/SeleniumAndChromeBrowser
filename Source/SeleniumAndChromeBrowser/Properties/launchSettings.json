@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SeleniumAndChromeBrowser": {
+      "commandName": "Project",
+      "commandLineArgs": "appsettings.json"
+    }
+  }
+}

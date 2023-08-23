@@ -25,6 +25,13 @@
     </None>
   </ItemGroup>
 
+  <Target Name="Date" BeforeTargets="BeforeBuild">
+	<WriteLinesToFile File="$(IntermediateOutputPath)gen.cs" Lines="static partial class Builtin { public static long CompileTime = $([System.DateTime]::UtcNow.Ticks) %3B }" Overwrite="true" />
+  </Target>
+  <ItemGroup>
+	<Compile Include="$(IntermediateOutputPath)gen.cs" />
+  </ItemGroup>
+  
   <Target Name="CopyCustomContentOnBuild" AfterTargets="Build">
     <Copy SourceFiles="$(MSBuildThisFileDirectory)\..\..\killTaskUsingPort.bat" DestinationFolder="$(OutputPath)" />
   </Target>
@@ -39,6 +46,8 @@
 
   <Target Name="CopyCustomLinuxContentOnPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier.Contains(linux))'">
     <Copy SourceFiles="$(OutputPath)\chromedriver" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="..\..\killTaskUsingPort.sh" DestinationFolder="$(PublishDir)" />
+    <Copy SourceFiles="..\..\install-dependencies-Linux-x64-Ubuntu.sh" DestinationFolder="$(PublishDir)" />
   </Target>
   
 </Project>

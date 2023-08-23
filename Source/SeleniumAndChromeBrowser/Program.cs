@@ -18,6 +18,7 @@ using System.Numerics;
 using System;
 using OpenQA.Selenium.Remote;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 
 namespace SeleniumAndChromeBrowser
 {
@@ -31,11 +32,25 @@ namespace SeleniumAndChromeBrowser
 
         static void Main(string[] args)
         {
-            config = InitConfiguration(executingDir);
+            var compileTime = new DateTime(Builtin.CompileTime, DateTimeKind.Utc).ToLocalTime();
+            string version = $"Selenium and Chrome example v1.1 - BuildDate {compileTime}";
+
+            string settingsFilename = "appsettings.json";
+            if (args.Length > 0) settingsFilename = args[0];
+
+            if (!File.Exists(settingsFilename))
+            {
+                Console.WriteLine($"{version}\n");
+                Console.WriteLine($"Error: settings file \"{settingsFilename}\" not found!");
+                return;
+            }
+
+            config = InitConfiguration(executingDir, settingsFilename);
             logger = InitLogging(config);
 
             logger.Information("");
             logger.Information("----------------------------------------------------------------------------------------------------------");
+            logger.Information($"{version}\n");
             logger.Information($"Starting, executing directory is \"{executingDir}\"");
 
             int debuggingPort = config.GetRequiredSection("ChromeDriver").GetValue<int>("DebuggingPort");
@@ -126,11 +141,11 @@ namespace SeleniumAndChromeBrowser
             logger.Information("Ended");
         }
 
-        static IConfigurationRoot InitConfiguration(string loadFromPath)
+        static IConfigurationRoot InitConfiguration(string loadFromPath, string settingsFilename)
         {
             IConfigurationRoot configuration = new ConfigurationBuilder()
                 .SetBasePath(loadFromPath)
-                .AddJsonFile("appsettings.json", optional: false)
+                .AddJsonFile(settingsFilename, optional: false)
                 .Build();
 
             return configuration;
@@ -167,22 +182,70 @@ namespace SeleniumAndChromeBrowser
 
         private static ChromeSearchResult ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
         {
-            string command = $"netstat -ano -p TCP";
-            ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
+            //string command = $"netstat -ano -p TCP";
+            //ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
+            //{
+            //    RedirectStandardOutput = true,
+            //    UseShellExecute = false,
+            //    CreateNoWindow = true
+            //};
+
+            //Process process = new Process() { StartInfo = startInfo };
+            //logger.Information($"Command run to find all processes using a TCP port: {command}");
+            //process.Start();
+
+            //string output = process.StandardOutput.ReadToEnd();
+            //logger.Debug($"Output:\n{output}");
+            //process.WaitForExit();
+            //process.Dispose();
+
+            Process process = new Process();
+            string command = "";
+            string arguments = "";
+            int numColumns;
+            int protoColumnIndex;
+            int localAddressColumnIndex;
+            int foreignAddressColumnIndex;
+            int stateColumnIndex;
+            int pidColumnIndex;
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
+                command = @"c:\Windows\System32\netstat.exe";
+                arguments = "-ano -p TCP";
+                numColumns = 5;
+                protoColumnIndex = 0;
+                localAddressColumnIndex = 1;
+                foreignAddressColumnIndex = 2;
+                stateColumnIndex = 3;
+                pidColumnIndex = 4;
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                command = "netstat";
+                arguments = "-tlnp";
+                numColumns = 7;
+                protoColumnIndex = 0;
+                localAddressColumnIndex = 3;
+                foreignAddressColumnIndex = 4;
+                stateColumnIndex = 5;
+                pidColumnIndex = 6;
+            }
+            else throw new ArgumentException($"Unsupported OS: {RuntimeInformation.OSDescription}");
 
-            Process process = new Process() { StartInfo = startInfo };
-            logger.Information($"Command run to find all processes using a TCP port: {command}");
+            process.StartInfo.FileName = command;
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.Arguments = arguments;
+            process.StartInfo.UseShellExecute = false;
+            process.StartInfo.CreateNoWindow = true;
+
+            logger.Information($"Command run to find all processes using a TCP port: {command} {arguments}");
             process.Start();
-
             string output = process.StandardOutput.ReadToEnd();
             logger.Debug($"Output:\n{output}");
             process.WaitForExit();
             process.Dispose();
+
 
             // Parse the output to get the process IDs from the last column
             string[] lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -191,13 +254,13 @@ namespace SeleniumAndChromeBrowser
             foreach (string line in lines)
             {
                 string[] columns = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                if (columns.Length != 5) continue;
+                if (columns.Length != numColumns) continue;
 
-                string protoColumn = columns[0];
-                string localAddressColumn = columns[1];
-                string foreignAddressColumn = columns[2];
-                string stateColumn = columns[3];
-                int pid = int.Parse(columns[4]);
+                string protoColumn = columns[protoColumnIndex];
+                string localAddressColumn = columns[localAddressColumnIndex];
+                string foreignAddressColumn = columns[foreignAddressColumnIndex];
+                string stateColumn = columns[stateColumnIndex];
+                int pid = int.Parse(columns[pidColumnIndex].Split('/')[0]); //on Linux PID is followed by /processName
 
                 try
                 {
@@ -405,7 +468,11 @@ namespace SeleniumAndChromeBrowser
         static void KillProcessByPort(int port)
         {
             Process process = new Process();
-            process.StartInfo.FileName = Path.Combine(executingDir, "killTaskUsingPort.bat");
+            string filename = "";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) filename = Path.Combine(executingDir, "killTaskUsingPort.bat");
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) filename = Path.Combine(executingDir, "killTaskUsingPort.sh");
+
+            process.StartInfo.FileName = filename;
             process.StartInfo.Arguments = port.ToString();
             process.StartInfo.RedirectStandardOutput = true;
             process.StartInfo.UseShellExecute = false;
@@ -414,8 +481,9 @@ namespace SeleniumAndChromeBrowser
             process.Start();
             string output = process.StandardOutput.ReadToEnd();
             process.WaitForExit();
+            process.Dispose();
 
-            Console.WriteLine(output);
+            logger.Information(output);
         }
 
         static string HeadlessDescription(bool isHeadless)
