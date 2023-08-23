@@ -12,7 +12,7 @@ output=""
 
 output=$(netstat -tulnp | grep "LISTEN" | grep ":$port")
 
-echo "Searching for processes listening on port $port..."
+echo "Searching for processes LISTENING on port $port..."
 if [ -n "$output" ]; then
     echo "$output"
     pid=$(echo "$output" | awk '{print $7}' | awk -F '/' '{print $1}')

@@ -208,6 +208,7 @@ namespace SeleniumAndChromeBrowser
             int foreignAddressColumnIndex;
             int stateColumnIndex;
             int pidColumnIndex;
+            string state;
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -219,6 +220,7 @@ namespace SeleniumAndChromeBrowser
                 foreignAddressColumnIndex = 2;
                 stateColumnIndex = 3;
                 pidColumnIndex = 4;
+                state = "LISTENING";
             }
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
             {
@@ -230,6 +232,7 @@ namespace SeleniumAndChromeBrowser
                 foreignAddressColumnIndex = 4;
                 stateColumnIndex = 5;
                 pidColumnIndex = 6;
+                state = "LISTEN";
             }
             else throw new ArgumentException($"Unsupported OS: {RuntimeInformation.OSDescription}");
 
@@ -270,9 +273,9 @@ namespace SeleniumAndChromeBrowser
                     {
                         chromeRunning = true;
 
-                        if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals("LISTENING", StringComparison.InvariantCultureIgnoreCase))
+                        if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals(state, StringComparison.InvariantCultureIgnoreCase))
                         {
-                            logger.Information($"A Chrome process was found LISTENING on port {portNumber}: Process ID: {pid}");
+                            logger.Information($"A Chrome process was found {state} on port {portNumber}: Process ID: {pid}");
                             return ChromeSearchResult.FoundAndListeningOnCorrectPort;
                         }
                     }
@@ -285,7 +288,7 @@ namespace SeleniumAndChromeBrowser
 
             if (chromeRunning)
             {
-                logger.Information($"Chrome process(es) were found, but *none* was LISTENING on port {portNumber}");
+                logger.Information($"Chrome process(es) were found, but *none* was in state {state} on port {portNumber}");
                 return ChromeSearchResult.Found;
             }
             else logger.Information($"No Chrome process was NOT found!");
