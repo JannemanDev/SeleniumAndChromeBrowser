@@ -165,7 +165,7 @@ namespace SeleniumAndChromeBrowser
                 logger.Information($"Screenshot  of website {website} saved to \"{screenshotPath}\"");
             }
 
-            logger.Information("Press any key to close the chromedriver and quit...");
+            //logger.Information("Press any key to close the chromedriver and quit...");
             //Console.ReadKey(true);
 
             ShutdownChromeDriver(driver, originalWindowHandles);

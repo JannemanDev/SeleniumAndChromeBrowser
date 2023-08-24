@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set TAG_NAME=v1.1
+set TAG_NAME=v1.2
 set "VERSION=%TAG_NAME:~1%"
 set RELEASE_TITLE=Release %TAG_NAME%
 set RELEASE_NOTES=
