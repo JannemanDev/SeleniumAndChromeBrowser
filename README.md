@@ -38,6 +38,11 @@ Luckily ChromeDriver will report if there is a mismatch.
 
 The profile is either located under the application direction or found in the Windows temp path. This can be controlled by using `UseTempPathForProfile`.  
 In this example project the profile location is dependent on the `DebuggingPort`, so it supports running multiple Chrome instances on different ports.  
+You can override the path yourself by specifying `OverrideProfilePath`. If set to empty string "" or NULL it will be ignored.
+
+If ChromeDriver is connected to Chrome it will open the website specified in `WebsiteToOpen`. After the specified number of seconds `ExtraWaitingTimeAfterWebsiteLoadedInSeconds` it will
+take a screenshot (controlled by `TakeScreenshot`) and/or dump the contents of the webpage (controlled by `DumpContents`). 
+The screenshot (.png) and contents (.html) files can be found in the executable directory.
 
 There are also some helper batch files for Windows:
 - `checkIfChromeIsListeningOnRemoteDebuggingPort.bat`: checks if Chrome is running and if it's listening on a specific port.

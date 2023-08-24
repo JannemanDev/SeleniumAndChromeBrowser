@@ -30,7 +30,7 @@ namespace SeleniumAndChromeBrowser
         static IConfigurationRoot config;
         static string executingDir = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             var compileTime = new DateTime(Builtin.CompileTime, DateTimeKind.Utc).ToLocalTime();
             string version = $"Selenium and Chrome example v1.1 - BuildDate {compileTime}";
@@ -70,13 +70,23 @@ namespace SeleniumAndChromeBrowser
                         if (chromeSearchResult != ChromeSearchResult.NotFound) CloseAllChromeInstances(chromeInstancesNotListeningOnSpecifiedDebuggingPort);
 
                         string profileDir = executingDir;
-                        bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
-                        if (useTempPathForProfile)
+                        string? overrideProfilePath = config.GetRequiredSection("ChromeDriver").GetValue<string?>("OverrideProfilePath");
+                        if (string.IsNullOrEmpty(overrideProfilePath))
                         {
-                            string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
-                            profileDir = tempDir;
+                            bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
+                            if (useTempPathForProfile)
+                            {
+                                string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
+                                profileDir = tempDir;
+                            }
+                            profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
+                            logger.Information($"Using generated profile path based on debuggingPort, using \"{profileDir}\"");
                         }
-                        profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
+                        else
+                        {
+                            logger.Information($"Overriding profile path, using \"{overrideProfilePath}\"");
+                            profileDir = overrideProfilePath;
+                        }
 
                         //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
                         string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
@@ -130,9 +140,33 @@ namespace SeleniumAndChromeBrowser
             logger.Information("Opening new tab");
             //open new tab and navigate to correct website
             driver.SwitchTo().NewWindow(WindowType.Tab);
-            string website = "https://www.google.nl"; //include protocol!
+            Uri website = new Uri(config.GetRequiredSection("Application").GetValue<string>("WebsiteToOpen"));
             logger.Information($"Navigating to {website}");
             driver.Navigate().GoToUrl(website);
+
+            int extraWaitingTimeAfterWebsiteLoadedInSeconds = config.GetRequiredSection("Application").GetValue<int>("ExtraWaitingTimeAfterWebsiteLoadedInSeconds");
+            await Task.Delay(TimeSpan.FromSeconds(extraWaitingTimeAfterWebsiteLoadedInSeconds));
+
+            bool dumpContents = config.GetRequiredSection("Application").GetValue<bool>("DumpContents");
+            if (dumpContents)
+            {
+                string filenameWebsiteContents = Path.Combine(executingDir, $"{website.Host}.html");
+                File.WriteAllText(filenameWebsiteContents, driver.PageSource);
+                logger.Information($"Contents of website {website} saved to \"{filenameWebsiteContents}\"");
+            }
+
+            bool takeScreenshot = config.GetRequiredSection("Application").GetValue<bool>("TakeScreenshot");
+
+            if (takeScreenshot)
+            {
+                // Capture screenshot
+                Screenshot screenshot = ((ITakesScreenshot)driver).GetScreenshot();
+
+                // Save the screenshot to a file
+                string screenshotPath = Path.Combine(executingDir, $"{website.Host}.png");
+                screenshot.SaveAsFile(screenshotPath, ScreenshotImageFormat.Png);
+                logger.Information($"Screenshot  of website {website} saved to \"{screenshotPath}\"");
+            }
 
             logger.Information("Press any key to close the chromedriver and quit...");
             Console.ReadKey(true);
@@ -183,66 +217,53 @@ namespace SeleniumAndChromeBrowser
         private static ChromeSearchResult ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
         {
             //string command = $"netstat -ano -p TCP";
-            //ProcessStartInfo startInfo = new ProcessStartInfo("cmd.exe", $"/c {command}")
-            //{
-            //    RedirectStandardOutput = true,
-            //    UseShellExecute = false,
-            //    CreateNoWindow = true
-            //};
 
-            //Process process = new Process() { StartInfo = startInfo };
-            //logger.Information($"Command run to find all processes using a TCP port: {command}");
-            //process.Start();
+            Dictionary<OSPlatform, NetstatOutputDefinition> platformConfigs = new Dictionary<OSPlatform, NetstatOutputDefinition>
+            {
+                {
+                    OSPlatform.Windows,
+                    new NetstatOutputDefinition
+                    {
+                        Command = @"c:\Windows\System32\netstat.exe",
+                        Arguments = "-ano -p TCP",
+                        NumColumns = 5,
+                        ProtoColumnIndex = 0,
+                        LocalAddressColumnIndex = 1,
+                        ForeignAddressColumnIndex = 2,
+                        StateColumnIndex = 3,
+                        PidColumnIndex = 4,
+                        State = "LISTENING"
+                    }
+                },
+                {
+                    OSPlatform.Linux,
+                    new NetstatOutputDefinition
+                    {
+                        Command = "netstat",
+                        Arguments = "-tlnp",
+                        NumColumns = 7,
+                        ProtoColumnIndex = 0,
+                        LocalAddressColumnIndex = 3,
+                        ForeignAddressColumnIndex = 4,
+                        StateColumnIndex = 5,
+                        PidColumnIndex = 6,
+                        State = "LISTEN"
+                    }
+                }
+            };
 
-            //string output = process.StandardOutput.ReadToEnd();
-            //logger.Debug($"Output:\n{output}");
-            //process.WaitForExit();
-            //process.Dispose();
+            OSPlatform currentPlatform = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? OSPlatform.Windows : OSPlatform.Linux;
+            NetstatOutputDefinition config = platformConfigs[currentPlatform];
 
             Process process = new Process();
-            string command = "";
-            string arguments = "";
-            int numColumns;
-            int protoColumnIndex;
-            int localAddressColumnIndex;
-            int foreignAddressColumnIndex;
-            int stateColumnIndex;
-            int pidColumnIndex;
-            string state;
 
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                command = @"c:\Windows\System32\netstat.exe";
-                arguments = "-ano -p TCP";
-                numColumns = 5;
-                protoColumnIndex = 0;
-                localAddressColumnIndex = 1;
-                foreignAddressColumnIndex = 2;
-                stateColumnIndex = 3;
-                pidColumnIndex = 4;
-                state = "LISTENING";
-            }
-            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                command = "netstat";
-                arguments = "-tlnp";
-                numColumns = 7;
-                protoColumnIndex = 0;
-                localAddressColumnIndex = 3;
-                foreignAddressColumnIndex = 4;
-                stateColumnIndex = 5;
-                pidColumnIndex = 6;
-                state = "LISTEN";
-            }
-            else throw new ArgumentException($"Unsupported OS: {RuntimeInformation.OSDescription}");
-
-            process.StartInfo.FileName = command;
+            process.StartInfo.FileName = config.Command;
             process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.Arguments = arguments;
+            process.StartInfo.Arguments = config.Arguments;
             process.StartInfo.UseShellExecute = false;
             process.StartInfo.CreateNoWindow = true;
 
-            logger.Information($"Command run to find all processes using a TCP port: {command} {arguments}");
+            logger.Information($"Command run to find all processes using a TCP port: {config.Command} {config.Arguments}");
             process.Start();
             string output = process.StandardOutput.ReadToEnd();
             logger.Debug($"Output:\n{output}");
@@ -257,13 +278,13 @@ namespace SeleniumAndChromeBrowser
             foreach (string line in lines)
             {
                 string[] columns = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                if (columns.Length != numColumns) continue;
+                if (columns.Length != config.NumColumns) continue;
 
-                string protoColumn = columns[protoColumnIndex];
-                string localAddressColumn = columns[localAddressColumnIndex];
-                string foreignAddressColumn = columns[foreignAddressColumnIndex];
-                string stateColumn = columns[stateColumnIndex];
-                int pid = int.Parse(columns[pidColumnIndex].Split('/')[0]); //on Linux PID is followed by /processName
+                string protoColumn = columns[config.ProtoColumnIndex];
+                string localAddressColumn = columns[config.LocalAddressColumnIndex];
+                string foreignAddressColumn = columns[config.ForeignAddressColumnIndex];
+                string stateColumn = columns[config.StateColumnIndex];
+                int pid = int.Parse(columns[config.PidColumnIndex].Split('/')[0]); //on Linux PID is followed by /processName
 
                 try
                 {
@@ -273,9 +294,9 @@ namespace SeleniumAndChromeBrowser
                     {
                         chromeRunning = true;
 
-                        if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals(state, StringComparison.InvariantCultureIgnoreCase))
+                        if (localAddressColumn.EndsWith($":{portNumber}") && stateColumn.Equals(config.State, StringComparison.InvariantCultureIgnoreCase))
                         {
-                            logger.Information($"A Chrome process was found {state} on port {portNumber}: Process ID: {pid}");
+                            logger.Information($"A Chrome process was found {config.State} on port {portNumber}: Process ID: {pid}");
                             return ChromeSearchResult.FoundAndListeningOnCorrectPort;
                         }
                     }
@@ -288,7 +309,7 @@ namespace SeleniumAndChromeBrowser
 
             if (chromeRunning)
             {
-                logger.Information($"Chrome process(es) were found, but *none* was in state {state} on port {portNumber}");
+                logger.Information($"Chrome process(es) were found, but *none* was in state {config.State} on port {portNumber}");
                 return ChromeSearchResult.Found;
             }
             else logger.Information($"No Chrome process was NOT found!");
@@ -299,6 +320,8 @@ namespace SeleniumAndChromeBrowser
         private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess, bool attach)
         {
             ChromeOptions chromeOptions = new ChromeOptions();
+            chromeOptions.PageLoadStrategy = PageLoadStrategy.Normal;
+
             string chromeType;
             if (headLess)
             {
@@ -463,7 +486,8 @@ namespace SeleniumAndChromeBrowser
             driver.Navigate().GoToUrl("about:blank");
 
             //See https://antoinevastel.com/bot%20detection/2018/01/17/detect-chrome-headless-v2.html#:%7E:text=In%20order%20to%20automate%20Chrome,possible%20to%20detect%20Chrome%20headless
-            bool chromeIsHeadless = driver.ExecuteScript("return navigator.webdriver").ToString().Equals("True", StringComparison.InvariantCultureIgnoreCase);
+            string result = driver.ExecuteScript("return navigator.webdriver").ToString();
+            bool chromeIsHeadless = result.Equals("True", StringComparison.InvariantCultureIgnoreCase);
 
             return chromeIsHeadless;
         }
