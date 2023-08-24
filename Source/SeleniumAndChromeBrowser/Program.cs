@@ -23,6 +23,7 @@ using System.Runtime.InteropServices;
 namespace SeleniumAndChromeBrowser
 {
     //TODO: - all tabs need to be loaded before opening a new tab by ChromeDriver succeeds?!
+    // If Chrome crashed previously then ChromeDriver will not be able to connect to it anymore! Workaround: use new profile or start with GUI one-time and then use headless
 
     internal class Program
     {
@@ -57,6 +58,7 @@ namespace SeleniumAndChromeBrowser
             bool runHeadless = config.GetRequiredSection("ChromeDriver").GetValue<bool>("RunHeadless");
 
             ChromeDriver? driver;
+            List<string> originalWindowHandles;
             ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode = config.GetRequiredSection("ChromeDriver").GetValue<ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode>("ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode");
             do
             {
@@ -69,24 +71,7 @@ namespace SeleniumAndChromeBrowser
                     {
                         if (chromeSearchResult != ChromeSearchResult.NotFound) CloseAllChromeInstances(chromeInstancesNotListeningOnSpecifiedDebuggingPort);
 
-                        string profileDir = executingDir;
-                        string? overrideProfilePath = config.GetRequiredSection("ChromeDriver").GetValue<string?>("OverrideProfilePath");
-                        if (string.IsNullOrEmpty(overrideProfilePath))
-                        {
-                            bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
-                            if (useTempPathForProfile)
-                            {
-                                string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
-                                profileDir = tempDir;
-                            }
-                            profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
-                            logger.Information($"Using generated profile path based on debuggingPort, using \"{profileDir}\"");
-                        }
-                        else
-                        {
-                            logger.Information($"Overriding profile path, using \"{overrideProfilePath}\"");
-                            profileDir = overrideProfilePath;
-                        }
+                        string profileDir = DetermineProfilePath(debuggingPort);
 
                         //always use a profile, else ChromeDriver will not connect to it when using multiple chrome instances because then default profile will be used!
                         string argumentsChrome = $"--remote-debugging-port={debuggingPort} --user-data-dir=\"{profileDir}\"";
@@ -96,7 +81,22 @@ namespace SeleniumAndChromeBrowser
                     }
                 }
 
-                driver = StartChromeDriver(debuggingPort, runHeadless, chromeSearchResult == ChromeSearchResult.FoundAndListeningOnCorrectPort);
+                driver = StartChromeDriver(debuggingPort, runHeadless, chromeSearchResult);
+
+                originalWindowHandles = GetWindowsHandles(driver);
+
+                if (!runHeadless)
+                {
+                    //preserve already opened tabs if any, make a new tab active
+                    logger.Information("Opening new tab");
+                    driver.SwitchTo().NewWindow(WindowType.Tab);
+                }
+                else
+                {
+                    //in headless mode a "data;" tab is opened
+                    driver.SwitchTo().Window(driver.WindowHandles[0]); //important! do not know why but else it will not work!
+                    originalWindowHandles.Remove(driver.WindowHandles[0]);
+                }
 
                 string chromeVersion = ChromeUserAgentVersion(driver);
                 logger.Information($"Chrome Browser User Agent string: {chromeVersion}");
@@ -117,7 +117,7 @@ namespace SeleniumAndChromeBrowser
                     }
                     else if (chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode == ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode.Exit)
                     {
-                        ShutdownChromeDriver(driver);
+                        ShutdownChromeDriver(driver, originalWindowHandles);
                         return;
                     }
                     else if (chromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode == ChromeInstanceAlreadyOnSpecifiedDebuggingPortButInDifferentMode.DontClose)
@@ -133,13 +133,10 @@ namespace SeleniumAndChromeBrowser
             if (driver == null)
             {
                 logger.Information("Quiting...");
-                ShutdownChromeDriver(driver);
+                ShutdownChromeDriver(driver, originalWindowHandles);
                 return;
             }
 
-            logger.Information("Opening new tab");
-            //open new tab and navigate to correct website
-            driver.SwitchTo().NewWindow(WindowType.Tab);
             Uri website = new Uri(config.GetRequiredSection("Application").GetValue<string>("WebsiteToOpen"));
             logger.Information($"Navigating to {website}");
             driver.Navigate().GoToUrl(website);
@@ -169,10 +166,46 @@ namespace SeleniumAndChromeBrowser
             }
 
             logger.Information("Press any key to close the chromedriver and quit...");
-            Console.ReadKey(true);
+            //Console.ReadKey(true);
 
-            ShutdownChromeDriver(driver);
+            ShutdownChromeDriver(driver, originalWindowHandles);
             logger.Information("Ended");
+        }
+
+        private static bool IsProfilePathOverriding()
+        {
+            string? overrideProfilePath = config.GetRequiredSection("ChromeDriver").GetValue<string?>("OverrideProfilePath");
+            return !string.IsNullOrEmpty(overrideProfilePath);
+        }
+
+        private static string DetermineProfilePath(int debuggingPort)
+        {
+            string profileDir = executingDir;
+            string? overrideProfilePath = config.GetRequiredSection("ChromeDriver").GetValue<string?>("OverrideProfilePath");
+            if (string.IsNullOrEmpty(overrideProfilePath))
+            {
+                bool useTempPathForProfile = config.GetRequiredSection("ChromeDriver").GetValue<bool>("UseTempPathForProfile");
+                if (useTempPathForProfile)
+                {
+                    string tempDir = Environment.ExpandEnvironmentVariables("%TEMP%");
+                    profileDir = tempDir;
+                }
+                profileDir = Path.Combine(profileDir, $"chrome-debug-profile-{debuggingPort}");
+                logger.Information($"Using generated profile path based on debuggingPort, using \"{profileDir}\"");
+            }
+            else
+            {
+                logger.Information($"Overriding profile path, using \"{overrideProfilePath}\"");
+                if (!Directory.Exists(overrideProfilePath))
+                {
+                    logger.Information($"Profile directory \"{overrideProfilePath}\" does *NOT* exist!");
+                    logger.Information($"Creating profile directory \"{overrideProfilePath}\"");
+                    Directory.CreateDirectory(overrideProfilePath);
+                }
+                profileDir = overrideProfilePath;
+            }
+
+            return profileDir;
         }
 
         static IConfigurationRoot InitConfiguration(string loadFromPath, string settingsFilename)
@@ -194,12 +227,40 @@ namespace SeleniumAndChromeBrowser
             return logger;
         }
 
-        private static void ShutdownChromeDriver(ChromeDriver? driver)
+        private static List<string> GetWindowsHandles(ChromeDriver? driver)
+        {
+            int windowsCount = driver.WindowHandles.Count;
+            logger.Information($"Chrome has {windowsCount} window(s) open:");
+
+            List<string> windowHandles = new List<string>();
+            foreach (string windowHandle in driver.WindowHandles)
+            {
+                logger.Information($" window {windowHandle}");
+                windowHandles.Add(windowHandle);
+            }
+
+            return windowHandles;
+        }
+
+        private static void ShutdownChromeDriver(ChromeDriver? driver, List<string> originalWindowHandles)
         {
             try
             {
                 logger.Information($"Closing ChromeDriver...");
-                driver?.Close();
+
+                if (driver != null)
+                {
+                    List<string> windowHandlesToClose = GetWindowsHandles(driver).Except(originalWindowHandles).ToList();
+
+                    // Close all windows
+                    foreach (string windowHandle in windowHandlesToClose)
+                    {
+                        driver.SwitchTo().Window(windowHandle);
+                        logger.Information($"Closing window {windowHandle} - {driver.Title}");
+                        driver.Close();
+                    }
+                }
+
                 logger.Information($"Closed ChromeDriver...");
             }
             catch (Exception ex)
@@ -216,8 +277,6 @@ namespace SeleniumAndChromeBrowser
 
         private static ChromeSearchResult ExistingChromeAvailableListeningOnCorrectPort(int portNumber)
         {
-            //string command = $"netstat -ano -p TCP";
-
             Dictionary<OSPlatform, NetstatOutputDefinition> platformConfigs = new Dictionary<OSPlatform, NetstatOutputDefinition>
             {
                 {
@@ -312,13 +371,15 @@ namespace SeleniumAndChromeBrowser
                 logger.Information($"Chrome process(es) were found, but *none* was in state {config.State} on port {portNumber}");
                 return ChromeSearchResult.Found;
             }
-            else logger.Information($"No Chrome process was NOT found!");
+            else logger.Information($"Chrome process(es) were *NOT* found!");
 
             return ChromeSearchResult.NotFound;
         }
 
-        private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess, bool attach)
+        private static ChromeDriver? StartChromeDriver(int debuggingPort, bool headLess, ChromeSearchResult chromeSearchResult)
         {
+            bool attach = (chromeSearchResult == ChromeSearchResult.FoundAndListeningOnCorrectPort);
+
             ChromeOptions chromeOptions = new ChromeOptions();
             chromeOptions.PageLoadStrategy = PageLoadStrategy.Normal;
 
@@ -327,6 +388,18 @@ namespace SeleniumAndChromeBrowser
             {
                 chromeType = "headless instance";
 
+                string profileDir = DetermineProfilePath(debuggingPort);
+
+                //chromeOptions.AddArgument("--verbose");
+                //chromeOptions.AddArgument($"--log-path=c:\\temp\\chromedriver.log"); // Specify your desired log file path
+                //chromeOptions.AddArgument($"--log-level=ALL");
+                //chromeOptions.SetLoggingPreference(LogType.Browser, LogLevel.All);
+                //chromeOptions.SetLoggingPreference(LogType.Client, LogLevel.All);
+                //chromeOptions.SetLoggingPreference(LogType.Driver, LogLevel.All);
+                //chromeOptions.SetLoggingPreference(LogType.Profiler, LogLevel.All);
+                //chromeOptions.SetLoggingPreference(LogType.Server, LogLevel.All);
+
+                chromeOptions.AddArgument($"--user-data-dir={profileDir}");
                 chromeOptions.AddArgument("--headless=new");
                 if (!attach) chromeOptions.AddArgument($"--remote-debugging-port={debuggingPort}");
                 else chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}";
@@ -335,15 +408,19 @@ namespace SeleniumAndChromeBrowser
                 extraHeadlessArguments = extraHeadlessArguments.Select(s => s.Trim()).Where(s => !string.IsNullOrEmpty(s)).ToArray();
                 chromeOptions.AddArguments(extraHeadlessArguments);
 
-                string extraHeadlessArgumentsString = "";
-                if (extraHeadlessArguments.Any()) extraHeadlessArgumentsString = $"and extra arguments: {string.Join(" ", extraHeadlessArguments)}";
-                logger.Information($"Chrome Driver will start in headless mode with remote-debugging-port={debuggingPort} {extraHeadlessArgumentsString}");
+                logger.Information($"Chrome Driver will start in headless mode and with:");
+                logger.Information($" remote-debugging-port={debuggingPort}");
+                logger.Information($" user-data-dir=\"{profileDir}\"");
+                if (extraHeadlessArguments.Any()) logger.Information($" extra arguments: {string.Join(" ", extraHeadlessArguments)}");
             }
             else
             {
                 chromeType = "browser";
                 chromeOptions.DebuggerAddress = $"127.0.0.1:{debuggingPort}"; //this line is not needed when using headless mode
             }
+
+            if (IsProfilePathOverriding() && chromeSearchResult == ChromeSearchResult.Found)
+                logger.Warning("If one of the other running Chrome instance(s) is using the same profile, ChromeDriver will fail to connect!");
 
             ChromeDriver? driver = null;
             try
@@ -379,6 +456,9 @@ namespace SeleniumAndChromeBrowser
                     logger.Information("Trying to use builtin or in path found ChromeDriver");
                     chromeDriverService = ChromeDriverService.CreateDefaultService();
                 }
+
+                chromeDriverService.LogPath = Path.Combine(executingDir, "chromedriver.log");
+                chromeDriverService.EnableVerboseLogging = false;
 
                 logger.Information($"Starting ChromeDriver and connecting to Chrome {chromeType} on 127.0.0.1:{debuggingPort}\n");
                 int connectionTimeOut = config.GetRequiredSection("ChromeDriver").GetValue<int>("connectionTimeOut");
@@ -471,8 +551,7 @@ namespace SeleniumAndChromeBrowser
         {
             if (driver == null) return "n/a";
 
-            driver.Navigate().GoToUrl("about:blank");
-
+            //No need to open a new tab
             // Execute JavaScript to get the browser version
             string browserVersion = driver.ExecuteScript("return navigator.userAgent").ToString();
 
@@ -483,8 +562,7 @@ namespace SeleniumAndChromeBrowser
         {
             if (driver == null) throw new ArgumentException("Driver is null!");
 
-            driver.Navigate().GoToUrl("about:blank");
-
+            //No need to open a new tab
             //See https://antoinevastel.com/bot%20detection/2018/01/17/detect-chrome-headless-v2.html#:%7E:text=In%20order%20to%20automate%20Chrome,possible%20to%20detect%20Chrome%20headless
             string result = driver.ExecuteScript("return navigator.webdriver").ToString();
             bool chromeIsHeadless = result.Equals("True", StringComparison.InvariantCultureIgnoreCase);
